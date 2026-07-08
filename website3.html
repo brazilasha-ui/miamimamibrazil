@@ -746,8 +746,6 @@ main{padding-top:58px}
 
 <script src="https://www.tiktok.com/embed.js" async></script>
 <script async defer src="//assets.pinterest.com/js/pinit.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 <script>
 // ═══ FIREBASE CONFIG ═══ Replace with YOUR values
 const FIREBASE_CONFIG = {
@@ -760,30 +758,46 @@ const FIREBASE_CONFIG = {
   appId: "1:139413366808:web:49331dc714402849643b6d",
   measurementId: "G-C31W4BE0ZL"
 };
-let db = null;
-const FB_ON = FIREBASE_CONFIG.apiKey !== "YOUR_API_KEY";
-if(FB_ON){
-  try{
-    firebase.initializeApp(FIREBASE_CONFIG);
-    db = firebase.database();
-    document.getElementById('setup-banner').style.display='none';
-    // Test write to confirm rules are open
-    db.ref('.info/connected').on('value',function(snap){
-      if(snap.val()===true){ console.log('Firebase connected'); }
-    });
-  }catch(e){
-    console.error('Firebase error:',e);
-    document.getElementById('setup-banner').style.display='block';
-    document.getElementById('setup-banner').innerHTML='&#9888; Firebase error: '+e.message+' — data saving to this device only';
-  }
+let db = null; // legacy flag kept for compatibility
+const DB_BASE = 'https://miamimami-default-rtdb.firebaseio.com/';
+const _listeners = {};
+
+function dbSet(path, val){
+  return fetch(DB_BASE+path+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(val)})
+    .then(function(r){if(!r.ok)throw new Error('DB write failed '+r.status);return r.json();})
+    .catch(function(e){console.warn('dbSet fallback',e);lsSet(path,val);});
 }
-else{ document.getElementById('setup-banner').style.display='block'; }
+function dbPush(path, val){
+  val.ts=Date.now();
+  return fetch(DB_BASE+path+'.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(val)})
+    .then(function(r){if(!r.ok)throw new Error('DB push failed '+r.status);return r.json();})
+    .catch(function(e){console.warn('dbPush fallback',e);lsSet(path+'/k'+Date.now(),val);return {key:'local'};});
+}
+function dbOn(path, cb){
+  // immediate fetch
+  fetch(DB_BASE+path+'.json')
+    .then(function(r){return r.json();})
+    .then(function(data){cb(data);})
+    .catch(function(e){cb(lsGet(path));});
+  // poll every 4s for live updates
+  if(_listeners[path])clearInterval(_listeners[path]);
+  _listeners[path]=setInterval(function(){
+    fetch(DB_BASE+path+'.json')
+      .then(function(r){return r.json();})
+      .then(function(data){cb(data);})
+      .catch(function(){});
+  },4000);
+}
+// REST API — no SDK needed
+document.getElementById('setup-banner').style.display='none';
+// Quick connectivity check
+fetch(DB_BASE+'.info/serverTimeOffset.json')
+  .then(function(r){return r.json();})
+  .then(function(){console.log('Firebase REST connected');})
+  .catch(function(e){console.warn('Firebase REST unavailable, using localStorage',e);});
 
 function lsGet(path){ const d=JSON.parse(localStorage.getItem('mmhq4')||'{}'); return path.split('/').reduce((o,k)=>o&&o[k]!==undefined?o[k]:null,d); }
 function lsSet(path,val){ const d=JSON.parse(localStorage.getItem('mmhq4')||'{}'); const keys=path.split('/'); let c=d; keys.slice(0,-1).forEach(k=>{if(!c[k])c[k]={};c=c[k];}); c[keys[keys.length-1]]=val; localStorage.setItem('mmhq4',JSON.stringify(d)); }
-function dbPush(path,val){ if(db)return db.ref(path).push(val); lsSet(path+'/k'+Date.now(),val); return Promise.resolve({key:'local'}); }
-function dbOn(path,cb){ if(db){db.ref(path).on('value',s=>cb(s.val()));return;} cb(lsGet(path)); setInterval(()=>cb(lsGet(path)),2500); }
-function dbSet(path,val){ if(db)return db.ref(path).set(val); lsSet(path,val); return Promise.resolve(); }
 
 // SPARKLES
 (function(){ const c=document.getElementById('sparkles'); for(let i=0;i<22;i++){ const s=document.createElement('div'); s.className='sp'; const sz=2+Math.random()*3; s.style.cssText='left:'+Math.random()*100+'%;width:'+sz+'px;height:'+sz+'px;animation-duration:'+(7+Math.random()*11)+'s;animation-delay:'+(Math.random()*10)+'s'; c.appendChild(s); } })();
@@ -822,18 +836,20 @@ const DAYS=[
   {id:'sun',label:'Sunday August 2',slots:['Travel Home']}
 ];
 let currentClosetPerson='Brazil';
-function renderCloset(person){
-  currentClosetPerson=person;
+window._closetCache=window._closetCache||{};
+var _closetListeners={};
+
+function buildClosetHTML(person, data){
   const body=document.getElementById('closet-body'); if(!body)return;
   let h='';
   DAYS.forEach(function(day){
     h+='<div class="cd-section"><div class="cd-day-title">'+day.label+'</div><div class="outfit-grid">';
     day.slots.forEach(function(slot,si){
       const key='cls_'+person+'_'+day.id+'_'+si;
-      const img=(window._closetCache&&window._closetCache[person]&&window._closetCache[person][key])||null;
+      const img=(data&&data[key])||null;
       const sk=key.replace(/'/g,"\\'");
-      h+='<div class="outfit-slot" id="os_'+key+'" onclick="uploadFit(\''+sk+'\')">';
-      if(img){ h+='<img src="'+img+'" alt=""><div class="outfit-overlay"><button onclick="event.stopPropagation();removeFit(\''+sk+'\')">Remove</button></div>'; }
+      h+='<div class="outfit-slot" id="os_'+key+'" onclick="uploadFit(\''+sk+'\',\''+person+'\')">';
+      if(img){ h+='<img src="'+img+'" alt=""><div class="outfit-overlay"><button onclick="event.stopPropagation();removeFit(\''+sk+'\',\''+person+'\')">Remove</button></div>'; }
       else{ h+='<div class="outfit-add">+</div><div class="outfit-slot-lbl">'+slot+'</div>'; }
       h+='</div>';
     });
@@ -841,13 +857,68 @@ function renderCloset(person){
   });
   body.innerHTML=h;
 }
+
+function renderCloset(person){
+  currentClosetPerson=person;
+  const body=document.getElementById('closet-body'); if(!body)return;
+  // Show cached data instantly — no loading flash
+  if(window._closetCache[person]){
+    buildClosetHTML(person, window._closetCache[person]);
+  } else {
+    body.innerHTML='<p style="text-align:center;padding:2rem;color:var(--muted);font-family:DM Sans,sans-serif">Loading outfits...</p>';
+  }
+  // Register Firebase listener only once per person
+  if(!_closetListeners[person]){
+    _closetListeners[person]=true;
+    dbOn('closet/'+person, function(data){
+      window._closetCache[person]=data||{};
+      if(currentClosetPerson===person){ buildClosetHTML(person, data||{}); }
+    });
+  }
+}
+
 function switchCloset(person,btn){ document.querySelectorAll('#closet-tabs .tab').forEach(t=>t.classList.remove('on')); if(btn)btn.classList.add('on'); renderCloset(person); }
-function uploadFit(key){
+
+function uploadFit(key, person){
+  if(!person)person=currentClosetPerson;
   const inp=document.createElement('input'); inp.type='file'; inp.accept='image/*';
-  inp.onchange=function(e){ const f=e.target.files[0]; if(!f)return; const r=new FileReader(); r.onload=function(ev){ try{ localStorage.setItem(key,ev.target.result); }catch(err){ alert('Photo too large. Try a smaller image.'); return; } const slot=document.getElementById('os_'+key); if(slot){ const sk=key.replace(/'/g,"\\'"); slot.innerHTML='<img src="'+ev.target.result+'" alt=""><div class="outfit-overlay"><button onclick="event.stopPropagation();removeFit(\''+sk+'\')">Remove</button></div>'; } }; r.readAsDataURL(f); };
+  inp.onchange=function(e){
+    const f=e.target.files[0]; if(!f)return;
+    const r=new FileReader();
+    r.onload=function(ev){
+      const img2=new Image();
+      img2.onload=function(){
+        const c=document.createElement('canvas');
+        const MAX=800; let w=img2.width,ht=img2.height;
+        if(w>MAX){ht=Math.round(ht*MAX/w);w=MAX;}
+        c.width=w; c.height=ht;
+        c.getContext('2d').drawImage(img2,0,0,w,ht);
+        const b64=c.toDataURL('image/jpeg',0.65);
+        // Update cache and display immediately
+        window._closetCache[person]=window._closetCache[person]||{};
+        window._closetCache[person][key]=b64;
+        const slot=document.getElementById('os_'+key);
+        if(slot){
+          const sk=key.replace(/'/g,"\\'");
+          slot.innerHTML='<img src="'+b64+'" alt=""><div class="outfit-overlay"><button onclick="event.stopPropagation();removeFit(\''+sk+'\',\''+person+'\')">Remove</button></div>';
+        }
+        // Save to Firebase
+        dbSet('closet/'+person+'/'+key, b64);
+      };
+      img2.src=ev.target.result;
+    };
+    r.readAsDataURL(f);
+  };
   inp.click();
 }
-function removeFit(key){ localStorage.removeItem(key); renderCloset(currentClosetPerson); }
+
+function removeFit(key, person){
+  if(!person)person=currentClosetPerson;
+  window._closetCache[person]=window._closetCache[person]||{};
+  delete window._closetCache[person][key];
+  dbSet('closet/'+person+'/'+key, null);
+  buildClosetHTML(person, window._closetCache[person]);
+}
 
 // SQUAD
 function initSquad(){ dbOn('promoters',function(data){ renderLeaderboard(data); renderPromoterLog(data); }); }
@@ -1083,7 +1154,6 @@ function switchTimeline(person,btn){
 
 function toggleTask(key,el){
   const done=el.classList.toggle('done');
-  dbSet('tasks/'+key, done ? {done:true} : null);
   dbSet('tasks/'+key, done ? {done:true,ts:Date.now()} : null);
 }
 
@@ -1203,10 +1273,6 @@ function togglePack(person,ci,ii,el){
 
 // INIT
 dbOn('tasks',function(d){window._taskCache=d||{};});
-initTaskSync();
-function initTaskSync(){
-  dbOn('tasks',function(data){ window._taskCache=data||{}; });
-}
 renderCloset('Brazil');
 renderBudget('Brazil');
 renderTimeline('brazil');
